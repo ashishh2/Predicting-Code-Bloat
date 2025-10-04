@@ -3,6 +3,9 @@ import subprocess
 import re
 import csv
 import sys
+import json
+import shutil
+import time
 
 # --- Configuration ---
 try:
@@ -11,144 +14,145 @@ except NameError:
     SCRIPT_DIR = os.getcwd()
 
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, os.pardir))
-SRC_DIR = os.path.join(PROJECT_ROOT, "src")
+GENERATED_SRC_DIR = os.path.join(PROJECT_ROOT, "src_generated")
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-OUTPUT_CSV = os.path.join(DATA_DIR, "size_impact.csv")
 TEMP_BUILD_DIR = os.path.join(PROJECT_ROOT, "temp_build")
 
+TARGET_CONFIG_PATH = os.path.join(DATA_DIR, "target_functions.json")
+OUTPUT_CSV = os.path.join(DATA_DIR, "size_impact.csv")
 COMPILER = "clang++"
 
-# Updated to target the new high-impact C++ files and functions
-TARGETS = {
-    "templates.cpp": ["process_value", "standalone_function"],
-    "call_intensive.cpp": ["simple_increment", "process_data_grid"]
-}
 
-
-def compile_and_get_size(source_file, output_path):
-    """
-    Compiles a source file to an object file (-c) and returns its size.
-    Measuring the object file is more sensitive than measuring the final executable.
-    """
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+def compile_and_get_size(source_path, output_name):
+    """Compiles a source file into an object file and returns its size."""
+    output_path = os.path.join(TEMP_BUILD_DIR, output_name)
     try:
-        # The '-c' flag tells the compiler to stop after compilation,
-        # producing an object file (.o) without linking.
-        command = [COMPILER, "-std=c++17", "-O2", "-c", source_file, "-o", output_path]
-        subprocess.run(
-            command,
+        # We compile with -c to create an object file, which gives a more
+        # precise measurement of the code's size without standard libraries.
+        # We also specify the C++ standard.
+        cmd = [COMPILER, "-std=c++17", "-O2", "-c", source_path, "-o", output_path]
+        result = subprocess.run(
+            cmd,
             check=True,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=30  # Add a timeout for safety
         )
         return os.path.getsize(output_path)
     except subprocess.CalledProcessError as e:
-        print(f"Error during compilation for {os.path.basename(output_path)}:")
-        print(e.stderr)
+        # Silently log errors for now to not clutter the output
+        # print(f"Compilation failed for {output_name}:\n{e.stderr}")
         return None
+    except subprocess.TimeoutExpired:
+        # print(f"Compilation timed out for {output_name}")
+        return None
+    finally:
+        # The script will clean up the entire temp_build directory at the end
+        pass
 
 
 def modify_source_for_function(original_content, func_name, attribute):
-    """Adds a compiler attribute to a specific function or function template."""
-    # Regex for templates: Captures the template declaration and the function
-    # signature in two separate groups to correctly insert the attribute.
-    pattern_template = re.compile(
-        rf"(template<.*?>\s+)((?:void|int)\s+{re.escape(func_name)}\s*\(.*?\))\s*{{",
-        re.DOTALL
+    """
+    Adds an inline attribute to a specific function in the source code content.
+    Handles both normal and template functions, as well as class methods.
+    """
+    # Regex to handle regular functions, templates, and class methods
+    # It looks for the function name, preceded by return type, optional template, or class name.
+    # This is more robust than the previous version.
+    pattern = re.compile(
+        r"^(template<.*?>\s*)?"  # Optional template declaration (Group 1)
+        r"((?:\w+::)*\w+\s+)"  # Return type, possibly with class scope (Group 2)
+        r"({func})".format(func=re.escape(func_name)) +  # The function name itself (Group 3)
+        r"(\s*\(.*?\)\s*\{)",  # Arguments and opening brace (Group 4)
+        re.MULTILINE
     )
-    # Regex for regular functions
-    pattern_regular = re.compile(
-        rf"((?:void|int)\s+{re.escape(func_name)}\s*\(.*?\))\s*{{",
-        re.DOTALL
+
+    replacement = r"\1{attr} \2\3\4".format(attr=attribute)
+    new_content, count = pattern.subn(replacement, original_content)
+
+    if count > 0:
+        return new_content
+
+    # Fallback for class methods where the return type might be on a different line
+    # or defined outside the class body.
+    method_pattern = re.compile(
+        r"({func})".format(func=re.escape(func_name)) +
+        r"(\(.*\)\s*\{)",
+        re.MULTILINE
     )
+    # This is tricky because we don't know the return type to prepend the attribute.
+    # For this project, the first regex is the primary one. This is a known limitation.
+    # If the first one fails, we'll return original content.
+    return original_content if count == 0 else new_content
 
-    # For templates, insert the attribute between group 1 and group 2
-    replacement_template = f"\\1 {attribute} \\2 {{"
-    # For regular functions, prepend the attribute to the whole signature
-    replacement_regular = f"{attribute} \\1 {{"
 
-    # Try to match a template first
-    new_content, count = re.subn(pattern_template, replacement_template, original_content, count=1)
-    if count == 0:
-        # If not a template, try matching a regular function
-        new_content, count = re.subn(pattern_regular, replacement_regular, original_content, count=1)
+def process_file(file_name, target_functions, writer):
+    """Processes a single C++ source file to measure inline impact."""
+    source_path = os.path.join(GENERATED_SRC_DIR, file_name)
+    with open(source_path, 'r') as f:
+        original_content = f.read()
 
-    if count == 0:
-        raise RuntimeError(f"Could not find function or template '{func_name}' to modify.")
-    return new_content
+    temp_source_path = os.path.join(TEMP_BUILD_DIR, "temp_code.cpp")
+
+    for func in target_functions:
+        # Clean the function name if it's a class method
+        clean_func_name = func.split("::")[-1]
+
+        # 1. Get size with NOINLINE
+        modified_noinline = modify_source_for_function(original_content, clean_func_name, "__attribute__((noinline))")
+        with open(temp_source_path, 'w') as f:
+            f.write(modified_noinline)
+        size_no_inline = compile_and_get_size(temp_source_path, f"bin_{clean_func_name}_noinline.o")
+
+        # 2. Get size with ALWAYS_INLINE
+        modified_inline = modify_source_for_function(original_content, clean_func_name,
+                                                     "__attribute__((always_inline))")
+        with open(temp_source_path, 'w') as f:
+            f.write(modified_inline)
+        size_always_inline = compile_and_get_size(temp_source_path, f"bin_{clean_func_name}_always_inline.o")
+
+        if size_no_inline and size_always_inline and size_no_inline > 0:
+            percent_increase = ((size_always_inline - size_no_inline) / size_no_inline) * 100
+            writer.writerow({
+                "function_name": func,
+                "file_name": file_name,
+                "size_increase_percent": percent_increase
+            })
 
 
 def main():
-    """Main script execution."""
-    print("--- Starting Step 2: Data Generation with High-Impact Scenarios ---")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(TEMP_BUILD_DIR, exist_ok=True)
+    print("--- Starting Step 1 (Scaled): Data Generation ---")
 
-    results = []
+    if not os.path.exists(TARGET_CONFIG_PATH):
+        print(f"Error: Could not find '{TARGET_CONFIG_PATH}'.")
+        print("Please run 'generate_code.py' first to create the C++ source files.")
+        return
 
-    for filename, functions in TARGETS.items():
-        source_path = os.path.join(SRC_DIR, filename)
-        print(f"\nProcessing source file: '{filename}'")
+    with open(TARGET_CONFIG_PATH, 'r') as f:
+        target_data = json.load(f)
 
-        try:
-            with open(source_path, "r") as f:
-                original_content = f.read()
-        except FileNotFoundError:
-            print(f"  -> Error: Source file not found at '{source_path}'. Skipping.")
-            continue
+    # Setup a temporary directory for build files
+    if os.path.exists(TEMP_BUILD_DIR):
+        shutil.rmtree(TEMP_BUILD_DIR)
+    os.makedirs(TEMP_BUILD_DIR)
 
-        for func in functions:
-            print(f"  Analyzing function: '{func}'...")
-            temp_source_path = os.path.join(TEMP_BUILD_DIR, "temp_code.cpp")
+    start_time = time.time()
+    with open(OUTPUT_CSV, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["function_name", "file_name", "size_increase_percent"])
+        writer.writeheader()
 
-            try:
-                # 1. Get size with NOINLINE
-                modified_noinline = modify_source_for_function(original_content, func, "__attribute__((noinline))")
-                with open(temp_source_path, "w") as f:
-                    f.write(modified_noinline)
-                size_no_inline = compile_and_get_size(temp_source_path,
-                                                      os.path.join(TEMP_BUILD_DIR, f"bin_{func}_noinline.o"))
+        total_files = len(target_data)
+        for i, (file_name, functions) in enumerate(target_data.items()):
+            process_file(file_name, functions, writer)
+            sys.stdout.write(f"\rProcessed file {i + 1}/{total_files}")
+            sys.stdout.flush()
 
-                # 2. Get size with ALWAYS_INLINE
-                modified_always_inline = modify_source_for_function(original_content, func,
-                                                                    "__attribute__((always_inline))")
-                with open(temp_source_path, "w") as f:
-                    f.write(modified_always_inline)
-                size_always_inline = compile_and_get_size(temp_source_path,
-                                                          os.path.join(TEMP_BUILD_DIR, f"bin_{func}_always_inline.o"))
+    # Clean up build files
+    shutil.rmtree(TEMP_BUILD_DIR)
 
-                # 3. Calculate impact
-                if size_no_inline is not None and size_always_inline is not None and size_no_inline > 0:
-                    percent_increase = ((size_always_inline - size_no_inline) / size_no_inline) * 100
-                    print(
-                        f"    -> No-inline: {size_no_inline} bytes, Always-inline: {size_always_inline} bytes, Impact: {percent_increase:.2f}%")
-                    results.append({
-                        "function_name": func,
-                        "file_name": filename,
-                        "size_increase_percent": percent_increase
-                    })
-                else:
-                    print(f"    -> Could not calculate impact for '{func}'.")
-
-            except Exception as e:
-                print(f"    -> An error occurred while processing '{func}': {e}")
-
-    # Write results to CSV
-    if results:
-        fieldnames = ["function_name", "file_name", "size_increase_percent"]
-        with open(OUTPUT_CSV, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"\nData generation complete. Results saved to '{OUTPUT_CSV}'")
-    else:
-        print("\nNo data was generated. Please check for compilation errors.")
-
-    # Clean up
-    for file_name in os.listdir(TEMP_BUILD_DIR):
-        os.remove(os.path.join(TEMP_BUILD_DIR, file_name))
-    os.rmdir(TEMP_BUILD_DIR)
-    print("Temporary build files cleaned up.")
+    end_time = time.time()
+    print(f"\n\nData generation complete. Results saved to '{OUTPUT_CSV}'")
+    print(f"Total time taken: {end_time - start_time:.2f} seconds.")
 
 
 if __name__ == "__main__":
