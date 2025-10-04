@@ -1,1 +1,5 @@
 libclang
+pandas
+scikit-learn
+lightgbm
+joblib
