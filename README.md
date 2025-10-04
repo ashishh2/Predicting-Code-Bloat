@@ -35,11 +35,11 @@ Let's look at a simple C++ example.
 ```cpp
 // A simple function to calculate the square  
 int square(int x) {  
-    return x \* x;  
+    return x * x;  
 }
 
 int main() {  
-    int result \= square(5); // The CPU has to jump to the 'square' function  
+    int result = square(5); // The CPU has to jump to the 'square' function  
     return 0;  
 }
 ```
@@ -49,7 +49,7 @@ When this code runs, the main function "calls" the square function. This involve
 The compiler might decide to "inline" the square function. It replaces the function call directly with the function's body:
 ```cpp
 int main() {  
-    int result \= 5 \* 5; // The compiler copy-pasted the function's code\!  
+    int result = 5 * 5; // The compiler copy-pasted the function's code\!  
     return 0;  
 }
 ```
