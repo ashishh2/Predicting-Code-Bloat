@@ -1,0 +1,5 @@
+function_name,file_name,size_increase_percent
+process_value,templates.cpp,-23.018147086914993
+standalone_function,templates.cpp,4.011461318051576
+simple_increment,call_intensive.cpp,-10.309278350515463
+process_data_grid,call_intensive.cpp,0.0

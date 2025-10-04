@@ -1,0 +1,5 @@
+function_name,file_name,is_template,cyclomatic_complexity,call_site_count,body_size_stmts
+process_value,templates.cpp,1,2,0,3
+standalone_function,templates.cpp,0,1,0,0
+simple_increment,call_intensive.cpp,0,1,0,1
+process_data_grid,call_intensive.cpp,0,3,1,8
