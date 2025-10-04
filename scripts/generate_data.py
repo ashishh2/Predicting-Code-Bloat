@@ -121,7 +121,7 @@ def process_file(file_name, target_functions, writer):
 
 
 def main():
-    print("--- Starting Step 2 (Scaled): Data Generation ---")
+    print("--- Starting Step 1 (Scaled): Data Generation ---")
 
     if not os.path.exists(TARGET_CONFIG_PATH):
         print(f"Error: Could not find '{TARGET_CONFIG_PATH}'.")

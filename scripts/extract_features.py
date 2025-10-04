@@ -115,7 +115,7 @@ def find_function_cursor(cursor, target_func_name):
 
 
 def main():
-    print("--- Starting Step 3 (Scaled): Feature Extraction from AST ---")
+    print("--- Starting Step 2 (Scaled): Feature Extraction from AST ---")
 
     if not os.path.exists(TARGET_CONFIG_PATH):
         print(f"Error: Could not find '{TARGET_CONFIG_PATH}'. Please run 'generate_code.py' first.")
